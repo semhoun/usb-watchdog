@@ -7,13 +7,13 @@ import argparse
 import threading
 from datetime import timedelta
 
-
 class UsbWatchDog(object):
 
     def __init__(self, port, heartbeat=10, baud=9600, daemon=True):
-        self.heartbeat = heartbeat if 10 < heartbeat <= 360 else 10
+        self.heartbeat = heartbeat if 10 < heartbeat <= 1270 else 10
         self.port = port
         self.watchdog = serial.Serial(self.port, baud)
+        logging.debug('Device Information {}'.format(self.get_info()))
         if daemon:
             run = threading.Thread(target=self.run)
             run.daemon = False
@@ -22,8 +22,8 @@ class UsbWatchDog(object):
     def _read(self, byte):
         try:
             self._write(byte)
-            a = self.read()
-            print(a)
+            a = self.watchdog.read()
+            return a
         except Exception as e:
             systemd.daemon.notify('STOPPING=1')
             raise Exception('Error while reading: {}'.format(e))
@@ -36,18 +36,28 @@ class UsbWatchDog(object):
             raise Exception('Error while writing: {}'.format(e))
 
     def get_info(self):
-        ''' TODO: get current system info
-        '''
-        with open('/proc/uptime', 'r') as f:
+        with open('/proc/uptime', mode='r') as f:
             uptime = float(f.readline().split()[0])
             last_boot = str(timedelta(seconds = uptime))
 
         scheduled_restart = 0
         info = {
             'last_boot':last_boot,
-            'scheduled_restart': 0,
-            'timeout':self.heartbeat
+            'timeout':self.heartbeat,
+            'firmware': 0,
         }
+        
+        ### xiaolaba, test code for the control protocol
+        ret = self._read(0x80) ## init, usbwatchdog reply b\0x81, b\0x00, \b0x02 (version 2) or 0x03 (version 3)
+        if ret[0] != 0x81:
+            raise Exception('Bad answer, expect 0x81: {}'.format(ret))
+        ret = self._read(0xe3)
+        if ret[0] != 0x00:
+            raise Exception('Bad answer, expect 0x00: {}'.format(ret))
+        ret = self._read(0x00)
+        info['firmware'] = ret[0]
+        ### xiaolaba, test code for the control protocol       
+        
         return info
         
     def run(self):
@@ -73,7 +83,7 @@ class UsbWatchDog(object):
         '''
         logging.debug('Restart Now')
         try:
-            self._write(255)
+            self._write(0xff)   ##reset or Restart Now
         except Exception as e:
             print('Error {}'.format(e))
             logging.warning('Error {}'.format(e))
@@ -84,7 +94,7 @@ class UsbWatchDog(object):
         logging.debug('Changing heart beat from {} to {}'
                       .format(self.heartbeat, timeout))
         try:
-            self.heartbeat = int(timeout) if 10 < int(timeout) <= 360 else 10
+            self.heartbeat = int(timeout) if 10 < int(timeout) <= 1270 else 10
         except ValueError as e:
             logging.warning('Invalid type, integer is required. Error {}'.format(e))
             raise TypeError
@@ -99,7 +109,6 @@ class UsbWatchDog(object):
         except urllib2.URLError as e: 
             return False
 
-
 if __name__ == '__main__':
     import systemd.daemon
     logging.basicConfig(level=logging.DEBUG)
@@ -107,17 +116,23 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Python Script to allow you to control a usb watchdog')
     parser.add_argument('port', type=str, 
-                        help='Serial port to use (e.g /dev/cu.wchussetila420)')
+                        help='Serial port to use (e.g /dev/ttyWDG)')
     parser.add_argument('--hb', nargs='?', const=10, type=int, 
                         help='Maximum amount of time without a hearbeat '
                         '(e.g. 180 seconds). 10 second increments only. '
-                        'Default: 10 seconds, Max: 360')
-    args = parser.parse_args()
+                        'Default: 10 seconds, Max: 1270')
+    parser.add_argument('--reset',  help='Send reset command',
+                            action="store_true")
+    parser.add_argument('--deamon',  help='Daemonize the process',
+                            action="store_true")  
+    args = parser.parse_args()	    
     hb = 10 if not args.hb else args.hb
     try:
-        device = UsbWatchDog(args.port, hb, daemon=False)
-        logging.debug('Device Information {}'.format(device.get_info()))
-        device.run()
+        device = UsbWatchDog(args.port, hb, daemon=args.deamon)
+        if args.reset:
+             device.reset()
+        if not args.deamon and not args.reset:
+             device.run()
 
     except (KeyboardInterrupt, SystemExit):
         logging.warning("Keyboard interrupt")
